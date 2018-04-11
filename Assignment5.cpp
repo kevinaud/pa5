@@ -1,12 +1,10 @@
-#define _GLIBCXX_USE_CXX11_ABI 0
 #define NUM_OPENGL_LIGHTS 8
 
 //#include <string.h>
 #include <iostream>
 #include <fstream>
 #include <string>
-#include <GL/glew.h>
-#include <GL/glut.h>
+#include <freeglut.h>
 #include <GL/glui.h>
 #include "Shape.h"
 #include "Cube.h"
@@ -16,6 +14,7 @@
 #include "SceneParser.h"
 #include "TextureMap.h"
 #include "Camera.h"
+#include <map>
 
 using namespace std;
 
@@ -65,18 +64,19 @@ void updateCamera();
 void flattenScene(SceneNode* node, Matrix compositeMatrix);
 Point calculateColor(int closestObjectNdx, Vector normalVector, Vector ray, Point isectWorldPoint);
 Point recursiveCalcColor(int closestObjectNdx, Vector normalVector, Vector ray, Point isectWorldPoint, int depth);
-Vector renderPixel(int x, int y);
+void renderPixel(int x, int y);
 Vector generateRay(int x, int y);
 void setpixel(GLubyte* buf, int x, int y, int r, int g, int b);
 bool isObjectBetweenLight(int closestObjectNdx, Point isectWorldPoint, Point lightPos);
 void callback_start(int id);
 void getClosestObject(Point eyePoint, Vector ray, double &minDist, int &closestObject);
 
-// TEMP
+map<string, TextureMap*> textures;
 TextureMap* earth;
 
 void callback_start(int id) {
 	cout << "start button clicked!" << endl;
+	cout << "max recursion: " << MAX_RECURSION << endl;
 
     delete earth;
     earth = new TextureMap("data/tests/image/earth.ppm");
@@ -99,9 +99,14 @@ void callback_start(int id) {
 	pixels = new GLubyte[pixelWidth  * pixelHeight * 3];
 	memset(pixels, 0, pixelWidth  * pixelHeight * 3);
 
+	int t = 0;
 	for (int i = 0; i < pixelWidth; i++) {
 		for (int j = 0; j < pixelHeight; j++) {
             renderPixel(i, j);
+			if ((i * pixelWidth + j) % 2500 == 0) {
+				t += 5;
+				cout << t << " lines processed " << endl;
+			}
 		}
 	}
 	cout << endl << "render complete" << endl;
@@ -111,7 +116,7 @@ void callback_start(int id) {
 	glutPostRedisplay();
 }
 
-Vector renderPixel(int x, int y) {
+void renderPixel(int x, int y) {
     Vector ray = generateRay(x, y);
     double minDist;
     int closestObject;
@@ -142,7 +147,9 @@ Vector renderPixel(int x, int y) {
         }
         color = color * 255;
         setpixel(pixels, x, y, color[0], color[1], color[2]);
-    }
+	} else {
+        setpixel(pixels, x, y, 0, 0, 0);
+	}
 }
 
 Point recursiveCalcColor(
@@ -170,13 +177,7 @@ Point recursiveCalcColor(
     int closestObject;
     double minDist;
     getClosestObject(isectWorldPoint, reflectionRay, minDist, closestObject);
-    //cout << "mindist " << minDist << endl;
 
-    /*     cout << closestObjectNdx << " x " << closestObject << endl; */
-    /* } else { */
-    /*     cout << "---" << endl; */ 
-    /* } */
-    
     if (closestObject > -1) {
         // get color at point of intersection
         //cout << "x";
@@ -195,17 +196,14 @@ Point recursiveCalcColor(
 
         // calc intersection point
         Point reflectedIsectWorldPoint = isectWorldPoint + minDist*reflectionRay;
-        /* Point reflectedColor = recursiveCalcColor(closestObject, normal, reflectionRay, reflectedIsectWorldPoint, depth++); */
-
         
         Point reflectedColor = recursiveCalcColor(closestObject, normal, reflectionRay, reflectedIsectWorldPoint, depth++);
 
         SceneMaterial material = sceneObjects[closestObject].material;
-		Point diffuse(material.cDiffuse.r, material.cDiffuse.g, material.cDiffuse.b); 
 
-        double reflectiveness = 1.0;
+		Point reflected(material.cReflective.r, material.cReflective.g, material.cReflective.b);
         for (int j = 0; j < 3; j++) {
-            double increment = globalData.ks * reflectiveness * reflectedColor[j];
+            double increment = globalData.ks * reflected[j] * reflectedColor[j];
             color[j] += increment;
             if (color[j] > 1.0) {
                 color[j] = 1.0; 
@@ -253,21 +251,41 @@ void setpixel(GLubyte* buf, int x, int y, int r, int g, int b) {
 }
 
 bool isObjectBetweenLight(int closestObjectNdx, Point isectWorldPoint, Point lightPos) {
-	Vector lightDir = isectWorldPoint - lightPos;
+	Vector lightDir = lightPos - isectWorldPoint;
+	double distToLight = lightDir.length();
     lightDir.normalize();
-    for (int i = 0; i < sceneObjects.size(); i++) {
-        if (i != closestObjectNdx) {
-        //    double dist = sceneObjects[i].Intersect(isectWorldPoint, lightDir, );
-        }
-    }
+
+	double minDist;
+	int closestObject;
+	getClosestObject(isectWorldPoint, lightDir, minDist, closestObject);
+
+	if (closestObject != -1 && minDist < distToLight) {
+		return true;
+	}
+	return false;
 }
 
 Point calculateColor(int closestObjectNdx, Vector normalVector, Vector ray, Point isectWorldPoint) {
     SceneObject closestObject = sceneObjects[closestObjectNdx];
-	Point color;
 	int i, j;
 
 	int numLights = parser->getNumLights();
+	SceneGlobalData globalData;
+	parser->getGlobalData(globalData);
+
+	Point diffuse;
+	if (closestObject.material.textureMap->isUsed) {
+		string filename = closestObject.material.textureMap->filename;
+		// check if texture needs to be loaded
+		if (textures.count(filename) < 1) {
+			textures[filename] = new TextureMap(filename);
+		}
+		diffuse = closestObject.shape->textureAt(isectWorldPoint, closestObject.transform, textures[filename]);
+	} else {
+		diffuse = Point(closestObject.material.cDiffuse.r, closestObject.material.cDiffuse.g, closestObject.material.cDiffuse.b);
+	}
+
+	Point color;
 
     // ITERATE OVER LIGHTS
 	for (int i = 0; i < numLights; i++) {
@@ -277,50 +295,33 @@ Point calculateColor(int closestObjectNdx, Vector normalVector, Vector ray, Poin
 		Vector lightDir = lightData.pos - isectWorldPoint;
 		lightDir.normalize();
         
-        if (isObjectBetweenLight(closestObjectNdx, isectWorldPoint, lightData.pos)) {
-        
-        }
-			
-		double dot_nl = dot(normalVector, lightDir);
-        Vector v = 2 * normalVector;
-		double dot_vr = dot(ray, ((v*dot_nl) - lightDir));
+        if (!isObjectBetweenLight(closestObjectNdx, isectWorldPoint, lightData.pos)) {
+			double dot_nl = dot(normalVector, lightDir);
+			Vector v = 2 * normalVector;
+			double dot_vr = dot(ray, ((v*dot_nl) - lightDir));
 
-		if (dot_nl<0) dot_nl = 0;
-		if (dot_vr<0) dot_vr = 0;
+			if (dot_nl<0) dot_nl = 0;
+			if (dot_vr<0) dot_vr = 0;
 
-		
-		double power = pow(dot_vr, closestObject.material.shininess);
-		//power = power * 255;
+			double power = pow(dot_vr, closestObject.material.shininess);
 
+			double blend = closestObject.material.blend;
+			double r_blend = 1 - blend;
 
-		Point diffuse = closestObject.shape->textureAt(isectWorldPoint, closestObject.transform, earth);
+			Point specular(closestObject.material.cSpecular.r, closestObject.material.cSpecular.g, closestObject.material.cSpecular.b);
 
-        /* if (closestObject) { */
-        /*     diffuse = Point(closestObject.material.cDiffuse.r, closestObject.material.cDiffuse.g, closestObject.material.cDiffuse.b); */ 
-        /* } */
-		//diffuse = diffuse *255;
+			Point lightColor(lightData.color.r, lightData.color.g, lightData.color.b);
 
-		double blend = closestObject.material.blend;
-		double r_blend = 1 - blend;
-
-		Point specular(closestObject.material.cSpecular.r, closestObject.material.cSpecular.g, closestObject.material.cSpecular.b);
-
-		Point lightColor(lightData.color.r, lightData.color.g, lightData.color.b);
-
-		for (j = 0; j<3; j++) {
-			color[j] = color[j] + diffuse[j] * dot_nl + specular[j] * lightColor[j] * power;
-			if (color[j]>1) {
-				color[j] = 1.0;
+			for (j = 0; j<3; j++) {
+				color[j] = color[j] + lightColor[j] * (globalData.kd * diffuse[j] * dot_nl + globalData.ks * specular[j] * power);
+				if (color[j]>1) {
+					color[j] = 1.0;
+				}
 			}
-		}
+        }
 	}
 	return color;
 }
-
-
-
-
-
 
 void callback_load(int id) {
 	char curDirName [2048];
@@ -582,6 +583,7 @@ int main(int argc, char* argv[])
 	glui->add_button("Load", 0, callback_load);
 	glui->add_button("Start!", 0, callback_start);
 	glui->add_checkbox("Isect Only", &isectOnly);
+	glui->add_spinner("Recursion Depth", GLUI_SPINNER_INT, &MAX_RECURSION);
 	
 	GLUI_Panel *camera_panel = glui->add_panel("Camera");
 	(new GLUI_Spinner(camera_panel, "RotateV:", &camRotV))
